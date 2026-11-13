@@ -1,0 +1,6 @@
+{
+  "name": "تحدي الأبطال: الوثب الثلاثي",
+  "description": "موقع تعليمي تفاعلي لمهارة الوثب الثلاثي لطالبات الصف السادس الابتدائي في مادة التربية البدنية عبر 15 محطة تعليمية وتدريبية.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,168 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Readex Pro', system-ui, sans-serif;
+    --font-body: 'Tajawal', system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+    --color-sky-accent: #38BDF8;
+    --color-deep-navy: #0F172A;
+    --color-sport-orange: #FF8500;
+    --color-natural-green: #22C55E;
+    --color-gold-trophy: #FFD700;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: #0F172A;
+    color: #0F172A;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Glassmorphism Educational Cards */
+.glass-surface {
+  background-color: rgba(255, 255, 255, 0.84);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  box-shadow:
+    0 12px 32px -12px rgba(15, 23, 42, 0.14),
+    0 0 0 1px rgba(255, 133, 0, 0.12);
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 180ms cubic-bezier(0.16, 1, 0.3, 1), border-color 180ms ease;
+}
+
+.glass-surface-interactive:hover {
+  border-color: rgba(255, 133, 0, 0.52);
+  box-shadow:
+    0 16px 36px -12px rgba(15, 23, 42, 0.18),
+    0 0 0 1px rgba(56, 189, 248, 0.35);
+}
+
+.glass-header {
+  background-color: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+@keyframes dashFlow {
+  to {
+    stroke-dashoffset: -36;
+  }
+}
+
+.animate-dash-flow {
+  stroke-dasharray: 10 8;
+  animation: dashFlow 1.2s linear infinite;
+}
+
+@keyframes cloudDriftSlow {
+  0% {
+    transform: translate3d(-6%, 0, 0);
+  }
+  50% {
+    transform: translate3d(6%, 0, 0);
+  }
+  100% {
+    transform: translate3d(-6%, 0, 0);
+  }
+}
+
+@keyframes particleFloat {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0.35;
+  }
+  50% {
+    transform: translate3d(8px, -18px, 0);
+    opacity: 0.85;
+  }
+}
+
+@keyframes trackGleam {
+  0% {
+    stroke-dashoffset: 240;
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.85;
+  }
+  100% {
+    stroke-dashoffset: -240;
+    opacity: 0.35;
+  }
+}
+
+@keyframes starTwinkle {
+  0%, 100% {
+    transform: scale(0.92);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.95;
+  }
+}
+
+.animate-cloud-drift {
+  animation: cloudDriftSlow 48s ease-in-out infinite;
+}
+
+.animate-particle-float {
+  animation: particleFloat 7s ease-in-out infinite;
+}
+
+.animate-track-gleam {
+  stroke-dasharray: 120 120;
+  animation: trackGleam 5s linear infinite;
+}
+
+.animate-star-twinkle {
+  animation: starTwinkle 4s ease-in-out infinite;
+}
+
+.reduce-bg-motion .animate-cloud-drift,
+.reduce-bg-motion .animate-particle-float,
+.reduce-bg-motion .animate-track-gleam,
+.reduce-bg-motion .animate-star-twinkle {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-dash-flow,
+  .animate-cloud-drift,
+  .animate-particle-float,
+  .animate-track-gleam,
+  .animate-star-twinkle {
+    animation: none !important;
+  }
+}
+
+@media print {
+  body {
+    background: #FFFFFF !important;
+    color: #0F172A !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only-area {
+    display: block !important;
+    box-shadow: none !important;
+    border: 2px solid #0284C7 !important;
+    margin: 0 auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    page-break-inside: avoid;
+    background: #FFFFFF !important;
+  }
+}
