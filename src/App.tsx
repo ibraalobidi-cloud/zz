@@ -41,7 +41,6 @@ import {
   pauseVoiceClip,
   playStepTone,
   playVoiceClip,
-  prefetchVoiceClip,
   resumeVoiceClip,
   setGlobalVoiceVolume,
   stopSpeaking,
@@ -143,6 +142,8 @@ export default function App() {
     activeKey: null,
     status: 'idle',
     error: null,
+    usingFallback: false,
+    canRetry: false,
   });
 
   useEffect(() => {
@@ -181,21 +182,6 @@ export default function App() {
   const heroName = progress.studentName.trim()
     ? `يا ${progress.studentName.trim()}`
     : 'يا بطلة';
-
-  // Background prefetch of next station's narration for instant playback
-  useEffect(() => {
-    const nextStation = STATIONS.find(
-      (s) => s.id === progress.currentStation + 1
-    );
-    if (!nextStation) return;
-    const text = progress.studentName.trim()
-      ? `${nextStation.mentorScript} هيا يا ${progress.studentName.trim()}!`
-      : nextStation.mentorScript;
-    const timer = window.setTimeout(() => {
-      void prefetchVoiceClip(text, 'narrate');
-    }, 1200);
-    return () => window.clearTimeout(timer);
-  }, [progress.currentStation, progress.studentName]);
 
   const playNoteAudio = async (note: VoiceNoteRecord) => {
     await playVoiceClip({
@@ -821,6 +807,13 @@ export default function App() {
           activeVoiceNote && voiceSnap.activeKey === activeVoiceNote.id
             ? voiceSnap.error
             : null
+        }
+        canRetry={
+          Boolean(
+            activeVoiceNote &&
+              voiceSnap.activeKey === activeVoiceNote.id &&
+              voiceSnap.canRetry
+          )
         }
         voiceVolume={progress.voiceVolume}
         onChangeVolume={handleChangeVoiceVolume}

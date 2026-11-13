@@ -28,6 +28,8 @@ export const VoiceReadButton: React.FC<VoiceReadButtonProps> = ({
     activeKey: null,
     status: 'idle',
     error: null,
+    usingFallback: false,
+    canRetry: false,
   });
 
   useEffect(() => {
@@ -36,6 +38,7 @@ export const VoiceReadButton: React.FC<VoiceReadButtonProps> = ({
 
   const isMine = snap.activeKey === clipKey;
   const status = isMine ? snap.status : 'idle';
+  const showRetryLabel = isMine && status === 'idle' && snap.canRetry;
 
   const handleClick = () => {
     if (status === 'loading') return;
@@ -82,7 +85,7 @@ export const VoiceReadButton: React.FC<VoiceReadButtonProps> = ({
       ) : (
         <>
           <Volume2 className="w-3.5 h-3.5" />
-          <span>{label}</span>
+          <span>{showRetryLabel ? 'إعادة المحاولة' : label}</span>
         </>
       )}
     </button>

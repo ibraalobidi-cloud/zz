@@ -31,6 +31,7 @@ interface VoiceNoteBannerProps {
   activeNote: VoiceNoteRecord | null;
   status: VoicePlaybackStatus;
   errorText?: string | null;
+  canRetry?: boolean;
   voiceVolume: number;
   onChangeVolume: (vol: number) => void;
   onPlayOrResume: (note: VoiceNoteRecord) => void;
@@ -45,6 +46,7 @@ export const VoiceNoteBanner: React.FC<VoiceNoteBannerProps> = ({
   activeNote,
   status,
   errorText,
+  canRetry = false,
   voiceVolume,
   onChangeVolume,
   onPlayOrResume,
@@ -110,9 +112,19 @@ export const VoiceNoteBanner: React.FC<VoiceNoteBannerProps> = ({
             </p>
 
             {errorText && (
-              <p className="text-xs text-orange-800 bg-white/80 rounded-lg px-2.5 py-1.5">
-                {errorText}
-              </p>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-orange-800 bg-white/80 rounded-lg px-2.5 py-1.5">
+                <span>{errorText}</span>
+                {canRetry && (
+                  <button
+                    type="button"
+                    onClick={() => onReplay(activeNote)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-orange-100 text-orange-900 hover:bg-orange-200 font-semibold cursor-pointer shrink-0"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>إعادة المحاولة</span>
+                  </button>
+                )}
+              </div>
             )}
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-1">

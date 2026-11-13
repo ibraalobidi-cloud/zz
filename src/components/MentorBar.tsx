@@ -13,7 +13,6 @@ import { ASSET_PATHS } from '../data/lessonData';
 import {
   pauseVoiceClip,
   playVoiceClip,
-  prefetchVoiceClip,
   resumeVoiceClip,
   stopSpeaking,
   subscribeVoiceState,
@@ -41,6 +40,8 @@ export const MentorBar: React.FC<MentorBarProps> = ({
     activeKey: null,
     status: 'idle',
     error: null,
+    usingFallback: false,
+    canRetry: false,
   });
   const [imgFailed, setImgFailed] = useState(false);
 
@@ -48,6 +49,7 @@ export const MentorBar: React.FC<MentorBarProps> = ({
   const isMine = voiceSnap.activeKey === mentorKey;
   const myStatus = isMine ? voiceSnap.status : 'idle';
   const myError = isMine ? voiceSnap.error : null;
+  const myCanRetry = isMine ? voiceSnap.canRetry : false;
 
   const personalizedScript = studentName?.trim()
     ? `${script} هيا يا ${studentName.trim()}!`
@@ -58,15 +60,9 @@ export const MentorBar: React.FC<MentorBarProps> = ({
     return unsub;
   }, []);
 
-  // Stop previous scene audio automatically on station change & prefetch current script
+  // Stop previous scene audio automatically on station change
   useEffect(() => {
     stopSpeaking();
-    const timer = window.setTimeout(() => {
-      void prefetchVoiceClip(personalizedScript, 'narrate');
-    }, 250);
-    return () => {
-      window.clearTimeout(timer);
-    };
   }, [stationNumber, personalizedScript]);
 
   const handlePrimaryPlayPause = () => {
@@ -127,7 +123,19 @@ export const MentorBar: React.FC<MentorBarProps> = ({
             {script}
           </p>
           {myError && (
-            <p className="text-xs text-orange-700 pt-0.5">{myError}</p>
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              <p className="text-xs text-orange-700">{myError}</p>
+              {myCanRetry && (
+                <button
+                  type="button"
+                  onClick={handleReplay}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-orange-100 text-orange-800 hover:bg-orange-200 text-xs font-semibold cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>إعادة المحاولة</span>
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>

@@ -1,8 +1,13 @@
+import mentorHeroImg from '../assets/images/mentor_girl_hero_1794560374457.jpg';
+import trackSceneImg from '../assets/images/track_sandpit_scene_1794560374972.jpg';
+import jumpPhasesImg from '../assets/images/triple_jump_phases_1794560375713.jpg';
+import certificateEmblemImg from '../assets/images/certificate_emblem_1794560376364.jpg';
+
 export const ASSET_PATHS = {
-  mentorHero: '/src/assets/images/mentor_girl_hero_1794560374457.jpg',
-  trackScene: '/src/assets/images/track_sandpit_scene_1794560374972.jpg',
-  jumpPhases: '/src/assets/images/triple_jump_phases_1794560375713.jpg',
-  certificateEmblem: '/src/assets/images/certificate_emblem_1794560376364.jpg',
+  mentorHero: mentorHeroImg,
+  trackScene: trackSceneImg,
+  jumpPhases: jumpPhasesImg,
+  certificateEmblem: certificateEmblemImg,
 } as const;
 
 export type StationSectionId =
