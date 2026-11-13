@@ -1,6 +1,8 @@
 // Unified Gemini Realistic Female Voice Audio Engine + Browser Arabic Fallback + Track SFX
 // Primary voice: Server-side Gemini TTS (/api/tts) compatible with Vercel Serverless & Express
-// Fallback voice: Browser Arabic SpeechSynthesis used ONLY when Gemini TTS cannot be reached/fails
+// Mobile Safari / Autoplay resilience: Synchronously unlocks AudioContext on tap and uses
+// Web Audio API WAV decoding if HTMLAudioElement.play() is blocked after async fetch.
+// Fallback voice: Browser Arabic SpeechSynthesis used ONLY when Gemini TTS cannot be reached/fails.
 
 export type VoiceTone =
   | 'celebrate'
@@ -36,10 +38,12 @@ let snapshot: VoicePlaybackSnapshot = {
 };
 
 let currentAudioEl: HTMLAudioElement | null = null;
+let currentWebAudioSource: AudioBufferSourceNode | null = null;
+let currentWebAudioGain: GainNode | null = null;
 let currentAbortController: AbortController | null = null;
 let currentVolume = 0.9;
 let playbackToken = 0;
-let activeMode: 'none' | 'gemini' | 'fallback' = 'none';
+let activeMode: 'none' | 'gemini' | 'webaudio' | 'fallback' = 'none';
 let lastPlayParams: {
   key: string;
   text: string;
@@ -47,9 +51,10 @@ let lastPlayParams: {
   volume?: number;
 } | null = null;
 
-// Bounded client-side ObjectURL cache + in-flight request deduplication
+// Bounded client-side Blob + ObjectURL cache + in-flight request deduplication
+const audioBlobCache = new Map<string, Blob>();
 const audioUrlCache = new Map<string, string>();
-const inFlightFetches = new Map<string, Promise<string>>();
+const inFlightFetches = new Map<string, Promise<{ url: string; blob: Blob }>>();
 
 let audioCtx: AudioContext | null = null;
 
@@ -82,6 +87,29 @@ export function setGlobalVoiceVolume(volume: number): void {
   if (currentAudioEl) {
     currentAudioEl.volume = clamped;
   }
+  if (currentWebAudioGain && audioCtx) {
+    try {
+      currentWebAudioGain.gain.setValueAtTime(clamped, audioCtx.currentTime);
+    } catch {
+      // Ignore gain update errors
+    }
+  }
+}
+
+function getAudioContext(): AudioContext | null {
+  if (typeof window === 'undefined') return null;
+  const Ctx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
+  if (!Ctx) return null;
+  if (!audioCtx) {
+    audioCtx = new Ctx();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(() => {});
+  }
+  return audioCtx;
 }
 
 function base64ToWavBlob(base64: string, mimeType = 'audio/wav'): Blob {
@@ -94,15 +122,17 @@ function base64ToWavBlob(base64: string, mimeType = 'audio/wav'): Blob {
   return new Blob([bytes], { type: mimeType });
 }
 
-function setBoundedMemoryCache(cacheKey: string, objectUrl: string): void {
+function setBoundedMemoryCache(cacheKey: string, blob: Blob, objectUrl: string): void {
   if (audioUrlCache.size >= MAX_CLIENT_CACHE) {
     const oldestKey = audioUrlCache.keys().next().value;
     if (oldestKey) {
       const oldUrl = audioUrlCache.get(oldestKey);
       if (oldUrl) URL.revokeObjectURL(oldUrl);
       audioUrlCache.delete(oldestKey);
+      audioBlobCache.delete(oldestKey);
     }
   }
+  audioBlobCache.set(cacheKey, blob);
   audioUrlCache.set(cacheKey, objectUrl);
 }
 
@@ -110,7 +140,9 @@ function buildCacheStorageRequestUrl(cacheKey: string): string {
   return `https://tts-cache.local/clip?key=${encodeURIComponent(cacheKey)}`;
 }
 
-async function readPersistentCache(cacheKey: string): Promise<string | null> {
+async function readPersistentCache(
+  cacheKey: string
+): Promise<{ url: string; blob: Blob } | null> {
   if (typeof window === 'undefined' || !('caches' in window)) return null;
   try {
     const cache = await window.caches.open(PERSISTENT_CACHE_NAME);
@@ -119,8 +151,8 @@ async function readPersistentCache(cacheKey: string): Promise<string | null> {
     const blob = await match.blob();
     if (blob.size === 0) return null;
     const url = URL.createObjectURL(blob);
-    setBoundedMemoryCache(cacheKey, url);
-    return url;
+    setBoundedMemoryCache(cacheKey, blob, url);
+    return { url, blob };
   } catch {
     return null;
   }
@@ -252,16 +284,17 @@ async function requestTtsFromServer(
   }
 }
 
-async function fetchOrGetCachedAudioUrl(
+async function fetchOrGetCachedAudio(
   text: string,
   tone: VoiceTone,
   signal?: AbortSignal
-): Promise<string> {
+): Promise<{ url: string; blob: Blob }> {
   const cleanText = text.trim();
   const cacheKey = `${tone}:${cleanText}`;
 
-  const memCached = audioUrlCache.get(cacheKey);
-  if (memCached) return memCached;
+  const memUrl = audioUrlCache.get(cacheKey);
+  const memBlob = audioBlobCache.get(cacheKey);
+  if (memUrl && memBlob) return { url: memUrl, blob: memBlob };
 
   const diskCached = await readPersistentCache(cacheKey);
   if (diskCached) return diskCached;
@@ -280,8 +313,8 @@ async function fetchOrGetCachedAudioUrl(
         const blob = await requestTtsFromServer(cleanText, tone, signal);
         void writePersistentCache(cacheKey, blob);
         const url = URL.createObjectURL(blob);
-        setBoundedMemoryCache(cacheKey, url);
-        return url;
+        setBoundedMemoryCache(cacheKey, blob, url);
+        return { url, blob };
       } catch (err) {
         lastError = err;
         if (err instanceof DOMException && err.name === 'AbortError') {
@@ -303,6 +336,61 @@ async function fetchOrGetCachedAudioUrl(
     return await fetchPromise;
   } finally {
     inFlightFetches.delete(cacheKey);
+  }
+}
+
+async function playWavBlobViaWebAudio(
+  blob: Blob,
+  key: string,
+  myToken: number
+): Promise<boolean> {
+  const ctx = getAudioContext();
+  if (!ctx) return false;
+  try {
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+    const arrayBuffer = await blob.arrayBuffer();
+    if (myToken !== playbackToken) return false;
+    const decoded = await ctx.decodeAudioData(arrayBuffer);
+    if (myToken !== playbackToken) return false;
+
+    const source = ctx.createBufferSource();
+    const gain = ctx.createGain();
+    source.buffer = decoded;
+    gain.gain.setValueAtTime(currentVolume, ctx.currentTime);
+    source.connect(gain);
+    gain.connect(ctx.destination);
+
+    currentWebAudioSource = source;
+    currentWebAudioGain = gain;
+    activeMode = 'webaudio';
+
+    source.onended = () => {
+      if (myToken !== playbackToken) return;
+      currentWebAudioSource = null;
+      currentWebAudioGain = null;
+      activeMode = 'none';
+      setSnapshot({
+        activeKey: null,
+        status: 'idle',
+        error: null,
+        usingFallback: false,
+        canRetry: false,
+      });
+    };
+
+    source.start(0);
+    setSnapshot({
+      activeKey: key,
+      status: 'playing',
+      error: null,
+      usingFallback: false,
+      canRetry: false,
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -369,7 +457,7 @@ function tryPlayBrowserArabicFallback(params: {
         status: 'playing',
         usingFallback: true,
         canRetry: true,
-        error: `${params.reasonMessage} (تم تفعيل الصوت العربي الاحتياطي للمتصفح)`,
+        error: `${params.reasonMessage} (تم تفعيل الصوت الاحتياطي مؤقتاً)`,
       });
     };
 
@@ -403,7 +491,7 @@ function tryPlayBrowserArabicFallback(params: {
       status: 'playing',
       usingFallback: true,
       canRetry: true,
-      error: `${params.reasonMessage} (تم تفعيل الصوت العربي الاحتياطي للمتصفح)`,
+      error: `${params.reasonMessage} (تم تفعيل الصوت الاحتياطي مؤقتاً)`,
     });
     synth.speak(utterance);
     return true;
@@ -432,6 +520,27 @@ export function stopSpeaking(): void {
     }
     currentAudioEl = null;
   }
+  if (currentWebAudioSource) {
+    try {
+      currentWebAudioSource.onended = null;
+      currentWebAudioSource.stop();
+      currentWebAudioSource.disconnect();
+    } catch {
+      // Ignore cleanup errors
+    }
+    currentWebAudioSource = null;
+  }
+  if (currentWebAudioGain) {
+    try {
+      currentWebAudioGain.disconnect();
+    } catch {
+      // Ignore
+    }
+    currentWebAudioGain = null;
+  }
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(() => {});
+  }
   if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
     try {
       window.speechSynthesis.cancel();
@@ -449,13 +558,25 @@ export function stopSpeaking(): void {
 }
 
 export function pauseVoiceClip(): void {
-  if (activeMode === 'fallback' && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  if (
+    activeMode === 'fallback' &&
+    typeof window !== 'undefined' &&
+    'speechSynthesis' in window
+  ) {
     try {
       window.speechSynthesis.pause();
       setSnapshot({ status: 'paused' });
     } catch {
       // Ignore
     }
+    return;
+  }
+
+  if (activeMode === 'webaudio' && audioCtx && audioCtx.state === 'running') {
+    audioCtx
+      .suspend()
+      .then(() => setSnapshot({ status: 'paused' }))
+      .catch(() => {});
     return;
   }
 
@@ -466,10 +587,24 @@ export function pauseVoiceClip(): void {
 }
 
 export async function resumeVoiceClip(): Promise<void> {
-  if (activeMode === 'fallback' && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  if (
+    activeMode === 'fallback' &&
+    typeof window !== 'undefined' &&
+    'speechSynthesis' in window
+  ) {
     try {
       window.speechSynthesis.resume();
       setSnapshot({ status: 'playing' });
+    } catch {
+      // Ignore
+    }
+    return;
+  }
+
+  if (activeMode === 'webaudio' && audioCtx && audioCtx.state === 'suspended') {
+    try {
+      await audioCtx.resume();
+      setSnapshot({ status: 'playing', error: null });
     } catch {
       // Ignore
     }
@@ -508,6 +643,9 @@ export async function playVoiceClip(params: {
     currentVolume = Math.max(0, Math.min(1, volume));
   }
 
+  // Synchronously unlock AudioContext inside user gesture before any await
+  getAudioContext();
+
   // Stop any previous audio, fallback speech, or in-flight request to prevent overlap
   stopSpeaking();
   const myToken = ++playbackToken;
@@ -523,7 +661,7 @@ export async function playVoiceClip(params: {
   });
 
   try {
-    const objectUrl = await fetchOrGetCachedAudioUrl(
+    const { url: objectUrl, blob } = await fetchOrGetCachedAudio(
       text,
       tone,
       controller.signal
@@ -580,13 +718,20 @@ export async function playVoiceClip(params: {
       });
       return true;
     } catch {
-      // Browser autoplay restriction (e.g. mobile Safari/Chrome before direct tap)
+      // If HTMLAudioElement.play() was blocked (e.g. mobile Safari after async fetch),
+      // play the same realistic Gemini WAV via pre-unlocked Web Audio API.
+      currentAudioEl = null;
+      const webAudioOk = await playWavBlobViaWebAudio(blob, key, myToken);
+      if (webAudioOk) {
+        return true;
+      }
+
       if (myToken !== playbackToken) return false;
       setSnapshot({
         activeKey: key,
         status: 'paused',
         usingFallback: false,
-        canRetry: false,
+        canRetry: true,
         error: 'جاهز للاستماع — اضغطي على زر التشغيل.',
       });
       return false;
@@ -637,27 +782,10 @@ export async function prefetchVoiceClip(
   const cacheKey = `${tone}:${cleanText}`;
   if (audioUrlCache.has(cacheKey) || inFlightFetches.has(cacheKey)) return;
   try {
-    await fetchOrGetCachedAudioUrl(cleanText, tone);
+    await fetchOrGetCachedAudio(cleanText, tone);
   } catch {
     // Silent prefetch failure
   }
-}
-
-// Gentle Web Audio UI sound effects for track steps & game actions
-function getAudioContext(): AudioContext | null {
-  if (typeof window === 'undefined') return null;
-  const Ctx =
-    window.AudioContext ||
-    (window as unknown as { webkitAudioContext?: typeof AudioContext })
-      .webkitAudioContext;
-  if (!Ctx) return null;
-  if (!audioCtx) {
-    audioCtx = new Ctx();
-  }
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume().catch(() => {});
-  }
-  return audioCtx;
 }
 
 export function playTone(

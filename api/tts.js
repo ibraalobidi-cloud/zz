@@ -1,36 +1,24 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import { GoogleGenAI } from '@google/genai';
 
-export type VoiceTone =
-  | 'celebrate'
-  | 'encourage'
-  | 'coach'
-  | 'narrate'
-  | 'question';
-
-export interface TtsRequestPayload {
-  text?: string;
-  tone?: VoiceTone;
-}
-
-type NodeLikeRequest = IncomingMessage & {
-  body?: unknown;
+export const config = {
+  maxDuration: 30,
 };
 
 const PRIMARY_MODEL = 'gemini-3.8-flash-lite-tts';
 const FALLBACK_MODEL = 'gemini-3.8-flash-tts';
-const GEMINI_TIMEOUT_MS = 20000;
+const GEMINI_TIMEOUT_MS = 22000;
 const MAX_TEXT_LENGTH = 900;
 const MAX_CACHE_SIZE = 120;
 const MODEL_COOLDOWN_MS = 5 * 60 * 1000;
 
-// Track models temporarily in cooldown after 429 quota responses
-const modelCooldownUntil = new Map<string, number>();
+// Persists across warm Vercel Serverless invocations & local Express runtime
+const ttsCache = new Map();
+const modelCooldownUntil = new Map();
 
 const BASE_PERSONA =
   'A young, warm, cheerful Saudi female physical education teacher speaking in clear Modern Standard Arabic with a gentle, natural Saudi accent to 6th-grade girls on an athletics track. Soft, natural, realistic human female voice with smiling warmth, clear pronunciation of sports terms, moderate comfortable pacing, and natural pauses between sentences. Never robotic or metallic.';
 
-const STYLE_MAP: Record<VoiceTone, string> = {
+const STYLE_MAP = {
   narrate: `${BASE_PERSONA} Tone: enthusiastic, welcoming, clear storytelling and guidance as if standing beside the students on the track.`,
   question: `${BASE_PERSONA} Tone: clear, attentive, friendly teacher reading an interactive question with a natural inquisitive cadence and brief pauses.`,
   celebrate: `${BASE_PERSONA} Tone: joyful, proud, genuinely excited smile praising a student for a great achievement or correct answer.`,
@@ -38,25 +26,15 @@ const STYLE_MAP: Record<VoiceTone, string> = {
   coach: `${BASE_PERSONA} Tone: gentle, empathetic, reassuring and supportive when guiding a student to try again after a mistake.`,
 };
 
-interface CachedAudioEntry {
-  wavBuffer: Buffer;
-  base64: string;
-  model: string;
-  createdAt: number;
-}
-
-// Persists across warm serverless container invocations & local Express runtime
-const ttsCache = new Map<string, CachedAudioEntry>();
-
-function getApiKey(): string | null {
-  const raw = process.env.GEMINI_API_KEY?.trim();
+function getApiKey() {
+  const raw = (process.env.GEMINI_API_KEY || '').trim();
   if (!raw || raw === 'MY_GEMINI_API_KEY') {
     return null;
   }
   return raw;
 }
 
-function createAiClient(apiKey: string): GoogleGenAI {
+function createAiClient(apiKey) {
   return new GoogleGenAI({
     apiKey,
     apiVersion: 'v1beta',
@@ -70,8 +48,8 @@ function createAiClient(apiKey: string): GoogleGenAI {
   });
 }
 
-function parseSampleRateFromMime(mimeType?: string): number {
-  if (!mimeType) return 24000;
+function parseSampleRateFromMime(mimeType) {
+  if (!mimeType || typeof mimeType !== 'string') return 24000;
   const match = mimeType.match(/rate=(\d+)/i);
   if (match && match[1]) {
     const parsed = Number.parseInt(match[1], 10);
@@ -84,9 +62,9 @@ function parseSampleRateFromMime(mimeType?: string): number {
 
 /**
  * Ensures returned audio bytes always have a valid 44-byte RIFF/WAV header
- * so HTMLAudioElement plays consistently across Chrome, Safari, iOS, and Firefox.
+ * so HTMLAudioElement / Web Audio API plays consistently across all browsers.
  */
-function ensureWavBuffer(rawBuffer: Buffer, mimeType?: string): Buffer {
+function ensureWavBuffer(rawBuffer, mimeType) {
   if (
     rawBuffer.length >= 12 &&
     rawBuffer.toString('ascii', 0, 4) === 'RIFF' &&
@@ -107,8 +85,8 @@ function ensureWavBuffer(rawBuffer: Buffer, mimeType?: string): Buffer {
   header.writeUInt32LE(36 + dataSize, 4);
   header.write('WAVE', 8, 'ascii');
   header.write('fmt ', 12, 'ascii');
-  header.writeUInt32LE(16, 16); // PCM chunk size
-  header.writeUInt16LE(1, 20); // PCM format
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
   header.writeUInt16LE(numChannels, 22);
   header.writeUInt32LE(sampleRate, 24);
   header.writeUInt32LE(byteRate, 28);
@@ -120,32 +98,18 @@ function ensureWavBuffer(rawBuffer: Buffer, mimeType?: string): Buffer {
   return Buffer.concat([header, rawBuffer]);
 }
 
-interface ClassifiedError {
-  status: number;
-  code: string;
-  userMessage: string;
-  technicalMessage: string;
-  retryable: boolean;
-}
-
-function classifyGeminiError(err: unknown): ClassifiedError {
-  const errObj = err as {
-    status?: number;
-    code?: string | number;
-    message?: string;
-    name?: string;
-  };
+function classifyGeminiError(err) {
   const msg =
     err instanceof Error
       ? err.message
-      : typeof errObj?.message === 'string'
-        ? errObj.message
+      : typeof err?.message === 'string'
+        ? err.message
         : String(err);
-  const statusCode = typeof errObj?.status === 'number' ? errObj.status : 0;
+  const statusCode = typeof err?.status === 'number' ? err.status : 0;
   const lower = msg.toLowerCase();
 
   if (
-    errObj?.name === 'AbortError' ||
+    err?.name === 'AbortError' ||
     lower.includes('timeout') ||
     lower.includes('timed out') ||
     lower.includes('etimedout') ||
@@ -157,7 +121,6 @@ function classifyGeminiError(err: unknown): ClassifiedError {
       code: 'TIMEOUT',
       userMessage: 'انتهت مهلة الاتصال بخدمة الصوت. يرجى المحاولة مرة أخرى.',
       technicalMessage: msg,
-      retryable: true,
     };
   }
 
@@ -173,7 +136,6 @@ function classifyGeminiError(err: unknown): ClassifiedError {
       userMessage:
         'تم تجاوز الحد المؤقت لطلبات توليد الصوت. انتظري لحظات ثم أعيدي المحاولة.',
       technicalMessage: msg,
-      retryable: false,
     };
   }
 
@@ -188,9 +150,8 @@ function classifyGeminiError(err: unknown): ClassifiedError {
       status: 502,
       code: 'INVALID_API_KEY',
       userMessage:
-        'تعذر التحقق من صلاحية مفتاح Gemini API على الخادم. يرجى مراجعة إعدادات البيئة.',
+        'تعذر التحقق من صلاحية مفتاح GEMINI_API_KEY على الخادم. يرجى مراجعة متغيرات البيئة في Vercel.',
       technicalMessage: msg,
-      retryable: false,
     };
   }
 
@@ -200,7 +161,6 @@ function classifyGeminiError(err: unknown): ClassifiedError {
       code: 'MODEL_UNAVAILABLE',
       userMessage: 'نموذج الصوت المطلوب غير متاح حالياً.',
       technicalMessage: msg,
-      retryable: false,
     };
   }
 
@@ -216,7 +176,6 @@ function classifyGeminiError(err: unknown): ClassifiedError {
       code: 'UPSTREAM_ERROR',
       userMessage: 'حدث خطأ مؤقت في الاتصال بخدمة الصوت الواقعي.',
       technicalMessage: msg,
-      retryable: true,
     };
   }
 
@@ -225,16 +184,10 @@ function classifyGeminiError(err: unknown): ClassifiedError {
     code: 'TTS_FAILED',
     userMessage: 'تعذر توليد الصوت الواقعي في الوقت الحالي.',
     technicalMessage: msg,
-    retryable: true,
   };
 }
 
-async function synthesizeWithModel(
-  ai: GoogleGenAI,
-  model: string,
-  text: string,
-  style: string
-): Promise<{ wavBuffer: Buffer; model: string }> {
+async function synthesizeWithModel(ai, model, text, style) {
   const response = await ai.models.generateContent({
     model,
     contents: [
@@ -277,46 +230,47 @@ async function synthesizeWithModel(
   return { wavBuffer, model };
 }
 
-async function readJsonBody(req: NodeLikeRequest): Promise<TtsRequestPayload> {
-  if (req.body && typeof req.body === 'object') {
-    return req.body as TtsRequestPayload;
-  }
-  if (typeof req.body === 'string') {
-    return JSON.parse(req.body) as TtsRequestPayload;
+async function readJsonBody(req) {
+  if (req.body !== undefined && req.body !== null) {
+    if (Buffer.isBuffer(req.body)) {
+      const str = req.body.toString('utf8').trim();
+      return str ? JSON.parse(str) : {};
+    }
+    if (typeof req.body === 'string') {
+      const str = req.body.trim();
+      return str ? JSON.parse(str) : {};
+    }
+    if (typeof req.body === 'object') {
+      return req.body;
+    }
   }
 
-  const chunks: Buffer[] = [];
+  const chunks = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   if (!raw) return {};
-  return JSON.parse(raw) as TtsRequestPayload;
+  return JSON.parse(raw);
 }
 
-function sendJson(
-  res: ServerResponse,
-  status: number,
-  payload: Record<string, unknown>,
-  extraHeaders: Record<string, string> = {}
-): void {
+function sendJson(res, status, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload);
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  if (status >= 400) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
   for (const [k, v] of Object.entries(extraHeaders)) {
     res.setHeader(k, v);
   }
   res.end(body);
 }
 
-export async function handleTtsNodeRequest(
-  req: NodeLikeRequest,
-  res: ServerResponse
-): Promise<void> {
+export default async function handler(req, res) {
   const startedAt = Date.now();
-  const method = (req.method ?? 'GET').toUpperCase();
+  const method = (req.method || 'GET').toUpperCase();
 
-  // Safe CORS & vary headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -327,14 +281,17 @@ export async function handleTtsNodeRequest(
     return;
   }
 
-  // Health check endpoint (GET /api/tts?health=1)
   if (method === 'GET') {
     const queryUrl = new URL(req.url || '/api/tts', 'http://localhost');
-    if (queryUrl.searchParams.get('health') === '1' || !queryUrl.searchParams.get('text')) {
+    if (
+      queryUrl.searchParams.get('health') === '1' ||
+      !queryUrl.searchParams.get('text')
+    ) {
       const configured = Boolean(getApiKey());
       sendJson(res, configured ? 200 : 503, {
         ok: configured,
         configured,
+        runtime: process.env.VERCEL ? 'vercel' : 'node',
         models: [PRIMARY_MODEL, FALLBACK_MODEL],
         cacheSize: ttsCache.size,
       });
@@ -351,7 +308,7 @@ export async function handleTtsNodeRequest(
   }
 
   try {
-    let payload: TtsRequestPayload = {};
+    let payload = {};
     let format = 'json';
 
     if (method === 'POST') {
@@ -368,13 +325,13 @@ export async function handleTtsNodeRequest(
     } else {
       const queryUrl = new URL(req.url || '/api/tts', 'http://localhost');
       payload = {
-        text: queryUrl.searchParams.get('text') ?? '',
-        tone: (queryUrl.searchParams.get('tone') as VoiceTone) || 'narrate',
+        text: queryUrl.searchParams.get('text') || '',
+        tone: queryUrl.searchParams.get('tone') || 'narrate',
       };
       format = queryUrl.searchParams.get('format') || 'json';
     }
 
-    const cleanText = (payload.text ?? '').trim();
+    const cleanText = String(payload?.text || '').trim();
     if (!cleanText) {
       sendJson(res, 400, {
         error: 'النص المطلوب تحويله إلى صوت فارغ.',
@@ -391,11 +348,11 @@ export async function handleTtsNodeRequest(
       return;
     }
 
-    const safeTone: VoiceTone =
-      payload.tone && payload.tone in STYLE_MAP ? payload.tone : 'narrate';
+    const rawTone = String(payload?.tone || 'narrate');
+    const safeTone = rawTone in STYLE_MAP ? rawTone : 'narrate';
     const cacheKey = `${safeTone}:${cleanText}`;
 
-    // 1. Check warm serverless / server in-memory cache
+    // 1. Check warm serverless / server cache
     const cached = ttsCache.get(cacheKey);
     if (cached) {
       console.info(
@@ -437,7 +394,7 @@ export async function handleTtsNodeRequest(
       );
       sendJson(res, 503, {
         error:
-          'مفتاح GEMINI_API_KEY غير مضبوط في إعدادات الخادم (Vercel Environment Variables).',
+          'مفتاح GEMINI_API_KEY غير مضبوط في إعدادات البيئة على Vercel (Environment Variables).',
         code: 'MISSING_API_KEY',
       });
       return;
@@ -447,23 +404,21 @@ export async function handleTtsNodeRequest(
     const style = STYLE_MAP[safeTone];
 
     // 3. Try primary model (flash-lite-tts), skipping models currently in 429 cooldown
-    let result: { wavBuffer: Buffer; model: string } | null = null;
-    let lastErr: unknown = null;
+    let result = null;
+    let lastErr = null;
     const now = Date.now();
 
-    const candidateAttempts: { model: string; delayMs: number }[] = [
+    const candidateAttempts = [
       { model: PRIMARY_MODEL, delayMs: 0 },
       { model: FALLBACK_MODEL, delayMs: 200 },
       { model: PRIMARY_MODEL, delayMs: 650 },
     ].filter((a, idx, arr) => {
-      const until = modelCooldownUntil.get(a.model) ?? 0;
+      const until = modelCooldownUntil.get(a.model) || 0;
       if (until > now) return false;
-      // Avoid repeating the same model twice back-to-back if the other model was filtered out
       if (idx > 0 && a.model === arr[idx - 1].model) return false;
       return true;
     });
 
-    // If every model is in cooldown, make one attempt on PRIMARY_MODEL to verify current status
     const attempts =
       candidateAttempts.length > 0
         ? candidateAttempts
@@ -484,14 +439,13 @@ export async function handleTtsNodeRequest(
         if (classified.code === 'RATE_LIMITED') {
           modelCooldownUntil.set(attempt.model, Date.now() + MODEL_COOLDOWN_MS);
           console.info(
-            `[TTS] Model ${attempt.model} rate-limited (429), switching to backup/fallback.`
+            `[TTS] Model ${attempt.model} rate-limited (429), switching to backup.`
           );
         } else {
           console.info(
             `[TTS] Attempt ${i + 1}/${attempts.length} skipped | model=${attempt.model} | code=${classified.code}`
           );
         }
-        // Do not retry if the API key itself is invalid
         if (classified.code === 'INVALID_API_KEY') {
           break;
         }

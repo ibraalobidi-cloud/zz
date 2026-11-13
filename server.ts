@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { handleTtsNodeRequest } from './api/_ttsCore.js';
+import handleTtsRequest from './api/tts.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,13 +12,13 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '1mb' }));
 
-// Mount unified Gemini TTS endpoints (identical core to Vercel Serverless Functions)
+// Mount unified Gemini TTS endpoints (same handler as Vercel Serverless /api/tts.js)
 app.all('/api/tts', (req, res) => {
-  void handleTtsNodeRequest(req, res);
+  void handleTtsRequest(req, res);
 });
 
 app.all('/api/voice-feedback', (req, res) => {
-  void handleTtsNodeRequest(req, res);
+  void handleTtsRequest(req, res);
 });
 
 async function startServer() {
